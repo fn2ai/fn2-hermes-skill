@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install validator deps
+        run: python -m pip install --quiet pyyaml
+      - name: Unit tests (offline — every network call is mocked)
+        run: python -m unittest discover -s tests -v
+      - name: Validate SKILL.md (agentskills.io frontmatter)
+        run: python tests/validate_skill.py skills/fn2/SKILL.md
+
+  smoke:
+    name: install-smoke (tools register)
+    runs-on: ubuntu-latest
+    env:
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bundled CLI registers every FN2 tool (no network)
+        run: |
+          CLI=skills/fn2/scripts/fn2
+          chmod +x "$CLI"
+          help="$(python3 "$CLI" --help)"
+          for cmd in research models usage agents runs; do
+            echo "$help" | grep -qw "$cmd" || { echo "::error::missing top-level command: $cmd"; exit 1; }
+          done
+          ahelp="$(python3 "$CLI" agents --help)"
+          for sub in list get create update pause resume run delete; do
+            echo "$ahelp" | grep -qw "$sub" || { echo "::error::missing agents subcommand: $sub"; exit 1; }
+          done
+          echo "All FN2 tools register (research + full agent loop lifecycle)."
+
+  research-smoke:
+    name: live research smoke (runs only when FN2_API_KEY secret is set)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Grounded research call against FN2
+        env:
+          FN2_API_KEY: ${{ secrets.FN2_API_KEY }}
+          FN2_API_BASE: ${{ vars.FN2_API_BASE }}
+        run: |
+          if [ -z "$FN2_API_KEY" ]; then
+            echo "FN2_API_KEY secret not configured — skipping live research smoke."
+            exit 0
+          fi
+          out="$(python3 skills/fn2/scripts/fn2 research 'What is the S&P 500 doing today?')"
+          echo "$out" | head -c 500
+          [ -n "$out" ] || { echo "::error::empty research response"; exit 1; }
